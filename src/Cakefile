@@ -1,0 +1,386 @@
+#無視するファイル名を正規表現で
+IGNORE_FILES = [
+  '^\\..'         #先頭がドットから始まる隠しファイルや隠しディレクトリ
+  '^Cakefile$'    #このファイル
+  '^Thumbs.db$'   #Windowsが生成するサムネイルファイル
+  '^_notes$'      #DreamWeaverデザインノート
+  '^.mno$'        #DreamWeaverデザインノートファイル
+  '^Templates$'   #DreamWeaverテンプレートディレクトリ
+  '^Library$'     #DreamWeaverライブラリディレクトリ
+  '.dwt$'         #DreamWeaverテンプレートファイル
+  '.lbi$'         #DreamWeaverライブラリファイル
+#  '.fla$'         #Flashファイル
+#  '.fw.png$'      #FireWorksファイル
+#  '.psd$'         #PhotoShopファイル
+#  '.ai$'          #Illustratorファイル
+#  '.tmp$'         #一時ファイル
+]
+#ソースディレクトリと書き出し先
+TARGET_DIR = '.'
+OUTPUT_DIR = '../public_html'
+
+#CoffeeScriptのファイル名を正規表現で
+COFFEE_FILES = ['.coffee$']
+#CoffeeScriptファイルのセパレーター
+COFFEE_SEPARATOR = '___'
+#bareオプションでコンパイルするファイル名
+COFFEE_BARE = 'global'
+
+
+#Sassファイル名を正規表現で
+SASS_FILES = ['.scss$']
+#コンパイル後のCSSファイルの拡張子
+SASS_RENAME = 'css'
+#Sassのコンパイルスタイル
+SASS_STYLE = 'compressed'        #nested, expanded, compact, compressed
+
+#ディレクトリセパレーター
+DIRECTORY_SEPARATOR = '/'
+#coffeeコマンドへのパス
+COMMAND_PATH = '/usr/local/bin/'
+
+fs = require 'fs'
+st = require 'stream'
+{exec} = require 'child_process'
+
+option '-o', '--output [DIR]', 'build先のディレクトリ'
+option '-t', '--target [DIR]', 'buildする元のディレクトリ'
+
+task 'build', 'webソースをbuildします。', (options) ->
+  targetDir = options.target or TARGET_DIR
+  outputDir = options.output or OUTPUT_DIR
+  copyFiles = []
+
+  #初期化
+  init = ->
+    return
+
+  #実行
+  run = ->
+    console.log """
+    ----------------------------
+    target #{targetDir}
+    output #{outputDir}
+    ----------------------------
+    """
+    FileUtil.check targetDir
+    FileUtil.check outputDir
+    (new Clean(outputDir)).run()
+    search = new Search targetDir, outputDir
+    #CoffeeScriptを走査
+    search.run()
+    files = search.getFiles()
+    coffees = search.getCoffees()
+    sasses = search.getSasses()
+    console.log '''
+    ----------------------------
+    ファイルをコピー
+    '''
+    (new Copy(files, targetDir, outputDir)).run(->
+      console.log '''
+      コピー完了
+      ----------------------------
+      CoffeeScriptコンパイル
+      '''
+      coffee = new Coffe coffees, targetDir, outputDir
+      coffee.run(->
+        console.log '''
+        コンパイル完了
+        ----------------------------
+        Sassコンパイル
+        '''
+        sass = new Sass sasses, targetDir, outputDir
+        sass.run(->
+          console.log '''
+          build完了
+          ============================
+          '''
+          return
+        )
+      )
+    )
+    return
+
+  init()
+  run()
+  return
+
+#ファイルユーティリティ
+class FileUtil
+  directory_separator = DIRECTORY_SEPARATOR
+  #指定されたディレクトリをチェック
+  @check = (path)->
+    console.log "#{path} を確認"
+    if !fs.existsSync path
+      throw new Error "#{path} が存在しません。"
+    if !fs.statSync(path).isDirectory()
+      throw new Error "#{path} はディレクトリを指定してください。"
+    console.log "確認完了"
+    return
+
+  #パスからファイル名を返す
+  @fileName = (path) ->
+    return path.split(/[\\\/]/).pop()
+
+  #ファイル名から拡張子を除く
+  @file = (fileName) ->
+    return fileName.split('.')[0]
+
+  #ルートディレクトリか確認
+  @isRoot = (path) ->
+    return (path == "#{directory_separator}")
+
+  #カレントディレクトリか確認
+  @isCurrent = (path) ->
+    return (path == ".#{directory_separator}")
+
+  #ペアレントディレクトリか確認
+  @isParent = (path) ->
+    return (path == "..#{directory_separator}")
+
+
+#指定されたディレクトリの中身を空にするクラスです。
+class Clean
+  directory_separator = DIRECTORY_SEPARATOR
+  constructor:(path)->
+    @_path = path
+
+  run:->
+    if !@_isPeril
+      @_check @_path
+    return
+
+  _isPeril:->
+    return (FileUtil.isRoot(@_path) or FileUtil.isCurrent(@_path) or FileUtil.isParent(@_path) )
+
+  _check:(path, root = path) ->
+    stats = fs.statSync path
+    if stats.isDirectory()
+      @_inDir path, root
+    else if stats.isFile()
+      @_forFile path
+    else
+      throw new Error "#{file} を削除できませんでした。"
+    return
+
+  _inDir:(path, root) ->
+    files = fs.readdirSync path
+    for file in files
+      current = "#{path}#{directory_separator}#{file}"
+      @_check current, root
+    if path != root
+      fs.rmdirSync path
+    return
+
+  _forFile:(path) ->
+    fs.unlinkSync path
+    return
+
+#指定したディレクトリを調べます。
+class Search
+  directory_separator = DIRECTORY_SEPARATOR
+  ignore_files = IGNORE_FILES
+  constructor:(target, output)->
+    @_target = target
+    @_output = output
+    @_files = []
+    @_coffees = []
+    @_sasses = []
+
+  init:->
+    @_files = []
+    @_coffees = []
+    @_sasses = []
+    return
+
+  run:->
+    @init()
+    @_search @_target
+    return
+
+  getFiles:->
+    return @_files
+
+  getCoffees:->
+    return @_coffees
+
+  getSasses:->
+    return @_sasses
+    
+  _search:(path) ->
+    stats = fs.statSync path
+    if @_isIgnore path
+      return
+    if stats.isDirectory()
+      @_inDir path
+    else if stats.isFile()
+      @_forFile path
+    else
+      throw new Error "#{file} を走査できませんでした。"
+    return
+
+  _inDir:(path) ->
+    output = path.replace @_target, @_output
+    if !fs.existsSync output
+      fs.mkdirSync output
+    files = fs.readdirSync path
+    for file in files
+      current = "#{path}#{directory_separator}#{file}"
+      @_search current
+    return
+
+  _forFile:(path) ->
+    if Coffe.isCoffee path
+      @_coffees.push path
+    else if Sass.isSass path
+      @_sasses.push path
+    else
+      @_files.push path
+    return
+
+  _isIgnore:(path) ->
+    name = FileUtil.fileName path
+    for ignore in ignore_files
+      if name.match new RegExp(ignore)
+        console.log "#{path} を除外"
+        return true
+    return false
+
+
+#ファイルをコピーします。
+class Copy
+  constructor:(files, target, output) ->
+    @_files = files
+    @_target = target
+    @_output = output
+    @_callBack
+
+  run:(callBack)->
+    @_callBack = callBack
+    @_copyAll(0)
+    return
+
+  _copyAll:(index = 0) ->
+    if index >= @_files.length
+      @_callBack()
+      return index
+    file = @_files[index]
+    @_copy file, file.replace(@_target, @_output), index
+    return
+
+  _copy:(src, dst, index) ->
+    input = fs.createReadStream src
+    output = fs.createWriteStream dst
+    input.pipe(output)
+    output.on 'close', =>
+      @_copyAll(++index)
+      return
+
+#CoffeeScriptを扱うツール
+class Coffe
+  coffee_files = COFFEE_FILES
+  coffee_separator = COFFEE_SEPARATOR
+  coffee_bare = COFFEE_BARE
+  constructor:(coffees, target, output)->
+    @_coffees = coffees
+    @_target = target
+    @_output = output
+    @_callback
+
+  run:(callback)->
+    @_callback = callback
+    @_compile 0
+    return
+
+  _compile:(index=0) ->
+    if index >= @_coffees.length
+      @_callback()
+      return index
+    path = @_coffees[index]
+    bare = ''
+    if @_isBare path
+      bare = '-b'
+    output = @_getOutputDir path
+    command = "coffee #{bare}  -o #{output} -c #{path}"
+    console.log 'コンパイル開始', command
+    exec command,(err,stdout,stderr)=>
+      throw err if err
+      console.log stdout,stderr
+      @_compile(++index)
+      return
+    return
+
+  _getOutputDir:(path)->
+    output = path.replace @_target, @_output
+    fileName = FileUtil.fileName path
+    return output.replace fileName, ''
+
+  _isBare:(path) ->
+    fileName = FileUtil.fileName path
+    fileName = FileUtil.file fileName
+    funcs = @_funcs fileName
+    return @__checkBare funcs
+
+  __checkBare:(funcs) ->
+    for func in funcs
+      if func == coffee_bare
+        return true
+    return false
+
+  _funcs:(name) ->
+    return name.split coffee_separator
+
+  #CoffeeScriptかどうかをファイル名からチェック
+  @isCoffee = (path) ->
+    for file in coffee_files
+      if path.match(new RegExp file)
+        return true
+    return false
+
+
+#Sassを扱うツール。
+class Sass
+  directory_separator = DIRECTORY_SEPARATOR
+  sass_files = SASS_FILES
+  sass_rename = SASS_RENAME
+  sass_style = SASS_STYLE
+  constructor:(sasses, target, output) ->
+    @_sasses = sasses
+    @_target = target
+    @_output = output
+    @_callback
+
+  run:(callback) ->
+    @_callback = callback
+    @_compile 0
+    return
+
+  _compile:(index = 0) ->
+    if index >= @_sasses.length
+      @_callback()
+      return
+    path = @_sasses[index]
+    output = @_rename path
+    command = "sass --style #{sass_style} #{path} #{output}"
+    console.log(command)
+    exec command,(err,stdout,stderr)=>
+      throw err if err
+      console.log stdout,stderr
+      @_compile(++index)
+      return
+    return
+
+  _rename:(path) ->
+    path = path.replace @_target, @_output
+    separatePath = path.split(directory_separator)
+    separateFile = separatePath[separatePath.length - 1].split('.')
+    separateFile[separateFile.length - 1] = sass_rename
+    separatePath[separatePath.length - 1] = separateFile.join('.')
+    path = separatePath.join(directory_separator)
+    return path
+
+  @isSass = (path) ->
+    for file in sass_files
+      if path.match(new RegExp file)
+        return true
+    return false
