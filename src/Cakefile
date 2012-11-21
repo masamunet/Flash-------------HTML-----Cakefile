@@ -273,8 +273,14 @@ class Copy
     output = fs.createWriteStream dst
     input.pipe(output)
     output.on 'close', =>
-      @_copyAll(++index)
+      @_timeStamp src, dst, index
       return
+
+  _timeStamp:(src, dst, index) ->
+    stats = fs.statSync src
+    fs.utimesSync dst, stats.atime, stats.mtime
+    @_copyAll(++index)
+
 
 #CoffeeScriptを扱うツール
 class Coffe
